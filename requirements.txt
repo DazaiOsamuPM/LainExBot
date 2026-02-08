@@ -1,26 +1,6 @@
-# Core dependencies
 aiogram==3.10.0
 yt-dlp
-
-# Async and networking
 aiohttp==3.9.1
 aiofiles==23.2.1
-
-# Utilities
 requests==2.31.0
 python-dotenv==1.0.0
-
-# Development and testing
-pytest==7.4.3
-pytest-asyncio==0.21.1
-black==23.12.1
-flake8==6.1.0
-mypy==1.7.1
-pre-commit==3.5.0
-
-# Monitoring (optional)
-prometheus-client==0.19.0
-
-# Additional utilities
-pathlib2==2.3.7.post1  # For older Python versions
-typing-extensions==4.9.0
