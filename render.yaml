@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: telegram-downloader-bot
+    runtime: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: MAX_CONCURRENT_DOWNLOADS
+        value: "3"
+      - key: MAX_FILE_SIZE_MB
+        value: "2048"
+      - key: DOWNLOAD_TIMEOUT_SECONDS
+        value: "600"
