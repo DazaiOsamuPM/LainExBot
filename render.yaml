@@ -1,3 +1,8 @@
+# Render (Free tier) deployment example.
+# Render Free plan requires an HTTP listener for health checks, so the bot boots a tiny
+# /health server. If you deploy to a worker-only environment (fly.io, Railway worker,
+# systemd, etc.) you can drop `start_health_server` from main.py and switch `type` to
+# `worker` here.
 services:
   - type: web
     name: telegram-downloader-bot
@@ -16,7 +21,11 @@ services:
         value: INFO
       - key: MAX_CONCURRENT_DOWNLOADS
         value: "3"
+      - key: MAX_USER_TASKS
+        value: "2"
+      # Public Bot API tops out at 50 MB per file. Raise only together with
+      # TELEGRAM_API_BASE pointing at a self-hosted Telegram Bot API Server.
       - key: MAX_FILE_SIZE_MB
-        value: "2048"
+        value: "50"
       - key: DOWNLOAD_TIMEOUT_SECONDS
         value: "600"

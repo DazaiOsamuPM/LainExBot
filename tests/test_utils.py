@@ -1,4 +1,4 @@
-﻿"""
+"""
 Unit tests for utility functions.
 """
 
@@ -63,6 +63,21 @@ class TestURLProcessing:
         """Test platform detection for unknown."""
         url = "https://unknown-site.com/video"
         assert detect_platform(url) == Platform.UNKNOWN
+
+    def test_is_supported_url_rejects_host_spoofing(self):
+        """Substring match must not accept hostile hosts that mention supported domains."""
+        spoof = "https://evil.example.com/?ref=tiktok.com/@user/video/1"
+        assert not is_supported_url(spoof)
+
+    def test_is_supported_url_accepts_subdomain(self):
+        assert is_supported_url("https://m.youtube.com/watch?v=abc")
+        assert is_supported_url("https://vm.tiktok.com/abcd")
+        assert is_supported_url("https://m.vkvideo.ru/video123")
+
+    def test_detect_platform_rejects_host_spoofing(self):
+        assert detect_platform("https://evil.example.com/tiktok.com") == Platform.UNKNOWN
+        assert detect_platform("https://m.youtube.com/watch?v=x") == Platform.YOUTUBE
+        assert detect_platform("https://fb.watch/abc") == Platform.FACEBOOK
 
 
 class TestFileOperations:

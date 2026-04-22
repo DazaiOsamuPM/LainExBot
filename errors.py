@@ -1,4 +1,4 @@
-﻿"""
+"""
 Error formatting and logging utilities.
 """
 
@@ -43,10 +43,23 @@ class ErrorManager:
                 "Отправьте прямую ссылку на пост или видео."
             )
 
-        if "too large" in msg or "размер" in msg or "max_filesize" in msg:
+        if (
+            "too large" in msg
+            or "размер" in msg
+            or "max_filesize" in msg
+            or "file is larger than max-filesize" in msg
+            or "request entity too large" in msg
+        ):
             return (
-                "❌ <b>Файл слишком большой для Telegram.</b>\n"
-                "Выберите аудио или другой ролик."
+                "❌ <b>Файл слишком большой для отправки.</b>\n"
+                "Публичный Bot API пропускает до 50 МБ. "
+                "Попробуйте аудио или более короткий ролик."
+            )
+
+        if "too many requests" in msg or "rate limit" in msg or "flood" in msg:
+            return (
+                "⏳ <b>Слишком много запросов.</b>\n"
+                "Подождите минуту и попробуйте снова."
             )
 
         if "timeout" in msg or "timed out" in msg:

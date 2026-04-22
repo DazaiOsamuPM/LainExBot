@@ -1,4 +1,4 @@
-﻿"""
+"""
 Download manager focused only on media extraction and delivery.
 """
 
@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import aiohttp
+from aiogram.exceptions import TelegramBadRequest, TelegramEntityTooLarge
 
 from config import (
     AUDIO_EXTENSIONS,
@@ -37,6 +38,8 @@ from utils import (
     sanitize_filename,
 )
 
+_PROGRESS_EDIT_INTERVAL_SECONDS = 3.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,10 +56,18 @@ class DownloadManager:
         self.active_tasks: Dict[int, set[int]] = {}
         self.queued_tasks: Dict[int, int] = {}
 
+        self._http_session: Optional[aiohttp.ClientSession] = None
+
         self._workers: List[asyncio.Task] = [
             asyncio.create_task(self._worker_loop(idx))
             for idx in range(self.max_concurrent)
         ]
+
+    def _get_http_session(self) -> aiohttp.ClientSession:
+        """Lazily create a shared HTTP session bound to the running loop."""
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+        return self._http_session
 
     async def add_download(self, callback_query: Any, url: str, mode: str) -> bool:
         """Queue a new download task for user."""
@@ -66,17 +77,9 @@ class DownloadManager:
 
         user_id = callback_query.from_user.id
         async with self.lock:
-            active = len(self.active_tasks.get(user_id, set()))
-            queued = self.queued_tasks.get(user_id, 0)
-            if active + queued >= self.max_concurrent:
-                await callback_query.message.answer(
-                    f"Лимит задач: {self.max_concurrent}. Дождитесь завершения текущих загрузок."
-                )
-                return False
-
             self.task_counter += 1
             task_id = self.task_counter
-            self.queued_tasks[user_id] = queued + 1
+            self.queued_tasks[user_id] = self.queued_tasks.get(user_id, 0) + 1
 
         await self.queue.put((task_id, callback_query, url, mode))
         return True
@@ -196,13 +199,12 @@ class DownloadManager:
                 filename += ".mp3" if is_audio else ".mp4"
 
             filepath = os.path.join(temp_dir, filename)
-            async with aiohttp.ClientSession() as session:
-                await download_file_async(
-                    url=url,
-                    filepath=filepath,
-                    session=session,
-                    timeout=DOWNLOAD_TIMEOUT_SECONDS,
-                )
+            await download_file_async(
+                url=url,
+                filepath=filepath,
+                session=self._get_http_session(),
+                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            )
             return filepath
 
         download_url = url
@@ -212,6 +214,7 @@ class DownloadManager:
                 download_url = normalized
 
         loop = asyncio.get_running_loop()
+        progress = _YtdlpProgressReporter(status_msg, loop) if status_msg else None
         if platform != Platform.TIKTOK:
             return await loop.run_in_executor(
                 None,
@@ -221,6 +224,7 @@ class DownloadManager:
                 is_audio,
                 allowed_ext,
                 False,
+                progress,
             )
 
         attempts = self._build_tiktok_attempt_plan(download_url)
@@ -235,6 +239,7 @@ class DownloadManager:
                     is_audio,
                     allowed_ext,
                     use_tiktok_app_api,
+                    progress,
                 )
             except Exception as error:
                 last_error = error
@@ -269,30 +274,30 @@ class DownloadManager:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as response:
-                    if response.status != 200:
-                        return None
-                    html_content = await response.text()
-
-                media_url = extract_tiktok_media_url_from_html(html_content)
-                if not media_url:
+            session = self._get_http_session()
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as response:
+                if response.status != 200:
                     return None
+                html_content = await response.text()
 
-                filepath = os.path.join(temp_dir, f"tiktok_{int(time.time())}.mp4")
-                await download_file_async(
-                    url=media_url,
-                    filepath=filepath,
-                    session=session,
-                    timeout=DOWNLOAD_TIMEOUT_SECONDS,
-                )
-                if os.path.exists(filepath):
-                    logger.info("TikTok direct HTML fallback succeeded")
-                    return filepath
+            media_url = extract_tiktok_media_url_from_html(html_content)
+            if not media_url:
+                return None
+
+            filepath = os.path.join(temp_dir, f"tiktok_{int(time.time())}.mp4")
+            await download_file_async(
+                url=media_url,
+                filepath=filepath,
+                session=session,
+                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            )
+            if os.path.exists(filepath):
+                logger.info("TikTok direct HTML fallback succeeded")
+                return filepath
         except Exception as error:
             logger.warning("TikTok direct HTML fallback failed for %s: %s", url, error)
 
@@ -301,8 +306,7 @@ class DownloadManager:
     async def _normalize_tiktok_url(self, url: str) -> Optional[str]:
         """Resolve and normalize TikTok URLs before yt-dlp extraction."""
         try:
-            async with aiohttp.ClientSession() as session:
-                return await normalize_tiktok_url_async(url, session)
+            return await normalize_tiktok_url_async(url, self._get_http_session())
         except Exception as error:
             logger.warning("TikTok normalization failed for %s: %s", url, error)
             return None
@@ -471,6 +475,7 @@ class DownloadManager:
         is_audio: bool,
         allowed_ext: Tuple[str, ...],
         use_tiktok_app_api: bool,
+        progress: Optional["_YtdlpProgressReporter"] = None,
     ) -> Optional[str]:
         """Blocking yt-dlp execution function used in thread pool."""
         from yt_dlp import YoutubeDL
@@ -480,6 +485,8 @@ class DownloadManager:
             is_audio=is_audio,
             use_tiktok_app_api=use_tiktok_app_api,
         )
+        if progress is not None:
+            options["progress_hooks"] = [progress]
 
         with YoutubeDL(options) as ydl:
             ydl.extract_info(url, download=True)
@@ -511,15 +518,28 @@ class DownloadManager:
                 pass
 
         caption = f"Готово: {Path(filepath).name}"
-        file = FSInputFile(filepath)
 
-        try:
-            if mode == FileFormat.AUDIO.value:
+        async def _send_as(kind: str) -> None:
+            file = FSInputFile(filepath)
+            if kind == "audio":
                 await callback_query.message.answer_audio(audio=file, caption=caption)
-            else:
+            elif kind == "video":
                 await callback_query.message.answer_video(video=file, caption=caption)
-        except Exception:
-            await callback_query.message.answer_document(document=file, caption=caption)
+            else:
+                await callback_query.message.answer_document(document=file, caption=caption)
+
+        primary_kind = "audio" if mode == FileFormat.AUDIO.value else "video"
+        try:
+            await _send_as(primary_kind)
+        except TelegramBadRequest as error:
+            # Only fall back to document for "wrong type / unsupported media" errors.
+            if _is_bad_media_type_error(error):
+                logger.info("Falling back to document upload: %s", error)
+                await _send_as("document")
+            else:
+                raise
+        except TelegramEntityTooLarge:
+            raise
 
         if status_msg:
             try:
@@ -534,12 +554,6 @@ class DownloadManager:
         url: str,
         status_msg: Any,
     ) -> None:
-        if status_msg:
-            try:
-                await status_msg.edit_text("Ошибка при загрузке.")
-            except Exception:
-                pass
-
         msg = str(error).lower()
         is_expected = (
             "drm protected" in msg
@@ -552,7 +566,18 @@ class DownloadManager:
             logger.error("Download failed for user=%s url=%s", callback_query.from_user.id, url, exc_info=True)
 
         user_message = error_manager.to_user_message(error, url=url)
-        await callback_query.message.answer(user_message, parse_mode="HTML")
+
+        # Prefer updating the existing status message so the user sees one final message.
+        delivered = False
+        if status_msg:
+            try:
+                await status_msg.edit_text(user_message, parse_mode="HTML")
+                delivered = True
+            except Exception:
+                logger.debug("Status message edit failed", exc_info=True)
+
+        if not delivered:
+            await callback_query.message.answer(user_message, parse_mode="HTML")
 
     def get_active_downloads_count(self) -> int:
         return self.processing
@@ -566,7 +591,7 @@ class DownloadManager:
         return self.queue.qsize()
 
     async def stop(self) -> None:
-        """Stop worker tasks gracefully."""
+        """Stop worker tasks gracefully and release shared resources."""
         for _ in self._workers:
             await self.queue.put(None)
 
@@ -575,3 +600,72 @@ class DownloadManager:
                 await worker
             except Exception:
                 logger.exception("Worker stop failed")
+
+        if self._http_session is not None and not self._http_session.closed:
+            try:
+                await self._http_session.close()
+            except Exception:
+                logger.debug("HTTP session close failed", exc_info=True)
+
+
+def _is_bad_media_type_error(error: TelegramBadRequest) -> bool:
+    """Detect Telegram errors that warrant falling back to document upload."""
+    message = (getattr(error, "message", None) or str(error)).lower()
+    return any(
+        marker in message
+        for marker in (
+            "wrong file",
+            "unsupported",
+            "invalid video",
+            "invalid audio",
+            "failed to get http url content",
+            "video_content_type_invalid",
+        )
+    )
+
+
+class _YtdlpProgressReporter:
+    """yt-dlp progress hook that throttles edits to a Telegram status message."""
+
+    def __init__(self, status_msg: Any, loop: asyncio.AbstractEventLoop) -> None:
+        self._status_msg = status_msg
+        self._loop = loop
+        self._last_edit = 0.0
+        self._last_text = ""
+
+    def __call__(self, info: Dict[str, Any]) -> None:
+        try:
+            text = self._format(info)
+        except Exception:
+            return
+        if not text or text == self._last_text:
+            return
+
+        now = time.monotonic()
+        if now - self._last_edit < _PROGRESS_EDIT_INTERVAL_SECONDS and info.get("status") != "finished":
+            return
+        self._last_edit = now
+        self._last_text = text
+
+        asyncio.run_coroutine_threadsafe(self._safe_edit(text), self._loop)
+
+    async def _safe_edit(self, text: str) -> None:
+        try:
+            await self._status_msg.edit_text(text)
+        except Exception:
+            logger.debug("Progress edit failed", exc_info=True)
+
+    @staticmethod
+    def _format(info: Dict[str, Any]) -> Optional[str]:
+        status = info.get("status")
+        if status == "downloading":
+            total = info.get("total_bytes") or info.get("total_bytes_estimate")
+            downloaded = info.get("downloaded_bytes") or 0
+            if total:
+                pct = min(100.0, (downloaded / total) * 100.0)
+                return f"⬇️ Загрузка: {pct:.0f}%"
+            # Unknown total size — show MB downloaded.
+            return f"⬇️ Загрузка: {downloaded / 1024 / 1024:.1f} МБ"
+        if status == "finished":
+            return "📦 Обработка файла…"
+        return None

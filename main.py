@@ -9,11 +9,13 @@ import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.telegram import TelegramAPIServer
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 from dotenv import load_dotenv
 
-from config import LOG_LEVEL, require_bot_token
+from config import LOG_LEVEL, TELEGRAM_API_BASE, require_bot_token
 from errors import setup_logging
 from handlers import BotHandlers
 from managers import DownloadManager
@@ -55,7 +57,15 @@ async def main() -> None:
     download_manager = None
     health_server_task = None
     try:
-        bot = Bot(token=require_bot_token(), default=DefaultBotProperties(parse_mode="HTML"))
+        session = None
+        if TELEGRAM_API_BASE:
+            api_server = TelegramAPIServer.from_base(TELEGRAM_API_BASE, is_local=True)
+            session = AiohttpSession(api=api_server)
+        bot = Bot(
+            token=require_bot_token(),
+            default=DefaultBotProperties(parse_mode="HTML"),
+            session=session,
+        )
         dispatcher = Dispatcher(storage=MemoryStorage())
 
         download_manager = DownloadManager()
