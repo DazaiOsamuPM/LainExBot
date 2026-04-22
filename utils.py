@@ -19,8 +19,6 @@ from config import (
     SUPPORTED_DOMAINS,
     SHORTENER_DOMAINS,
     TEMP_DIR_PREFIX,
-    VIDEO_EXTENSIONS,
-    AUDIO_EXTENSIONS,
 )
 from models import Platform
 
@@ -52,44 +50,66 @@ def strip_tracking_params(url: str) -> str:
         return url
 
 
+def _url_hostname(url: str) -> Optional[str]:
+    """Safely extract lowercase hostname from URL."""
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        return None
+    return host.lower() if host else None
+
+
+def _host_matches(host: Optional[str], domain: str) -> bool:
+    """True if `host` equals `domain` or is a subdomain of it."""
+    if not host:
+        return False
+    domain = domain.lower()
+    return host == domain or host.endswith("." + domain)
+
+
+def host_matches_any(url: str, domains) -> bool:
+    """True if URL host equals or is a subdomain of any entry in `domains`."""
+    host = _url_hostname(url)
+    if not host:
+        return False
+    return any(_host_matches(host, d) for d in domains)
+
+
 def is_supported_url(url: str) -> bool:
     """Check whether URL belongs to a supported platform or is a direct media file."""
     if not url:
         return False
-    low = url.lower()
-    if any(domain in low for domain in SUPPORTED_DOMAINS):
+    if host_matches_any(url, SUPPORTED_DOMAINS):
         return True
     return bool(DIRECT_FILE_RE.search(url))
 
 
+_PLATFORM_BY_DOMAIN = (
+    (("youtube.com", "youtu.be"), Platform.YOUTUBE),
+    (("tiktok.com",), Platform.TIKTOK),
+    (("instagram.com",), Platform.INSTAGRAM),
+    (("facebook.com", "fb.watch"), Platform.FACEBOOK),
+    (("twitter.com", "x.com"), Platform.TWITTER),
+    (("vk.com", "vkvideo.ru"), Platform.VK),
+    (("reddit.com", "redd.it"), Platform.REDDIT),
+    (("pinterest.com", "pin.it"), Platform.PINTEREST),
+    (("dailymotion.com", "dai.ly"), Platform.DAILYMOTION),
+    (("vimeo.com",), Platform.VIMEO),
+    (("soundcloud.com",), Platform.SOUNDCLOUD),
+)
+
+
 def detect_platform(url: str) -> Platform:
-    """Detect source platform by URL."""
+    """Detect source platform by URL hostname."""
     if not url:
         return Platform.UNKNOWN
 
-    low = url.lower()
-    if "youtube.com" in low or "youtu.be" in low:
-        return Platform.YOUTUBE
-    if "tiktok.com" in low:
-        return Platform.TIKTOK
-    if "instagram.com" in low:
-        return Platform.INSTAGRAM
-    if "facebook.com" in low:
-        return Platform.FACEBOOK
-    if "twitter.com" in low or "x.com" in low:
-        return Platform.TWITTER
-    if "vk.com" in low or "m.vkvideo.ru" in low:
-        return Platform.VK
-    if "reddit.com" in low:
-        return Platform.REDDIT
-    if "pinterest.com" in low or "pin.it" in low:
-        return Platform.PINTEREST
-    if "dailymotion.com" in low:
-        return Platform.DAILYMOTION
-    if "vimeo.com" in low:
-        return Platform.VIMEO
-    if "soundcloud.com" in low:
-        return Platform.SOUNDCLOUD
+    host = _url_hostname(url)
+    if host:
+        for domains, platform in _PLATFORM_BY_DOMAIN:
+            if any(_host_matches(host, d) for d in domains):
+                return platform
+
     if DIRECT_FILE_RE.search(url):
         return Platform.DIRECT
     return Platform.UNKNOWN
@@ -206,7 +226,7 @@ async def normalize_tiktok_url_async(url: str, session: aiohttp.ClientSession) -
     - resolve short links
     - extract direct /video/ URL from destination page when needed
     """
-    low = url.lower()
+    host = (_url_hostname(url) or "")
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -216,7 +236,7 @@ async def normalize_tiktok_url_async(url: str, session: aiohttp.ClientSession) -
 
     try:
         final_url = url
-        if any(domain in low for domain in SHORTENER_DOMAINS):
+        if any(_host_matches(host, domain) for domain in SHORTENER_DOMAINS):
             try:
                 async with session.head(
                     url,

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+
+# Secrets
+.env
+.env.local
+*.cookies.txt
+
+# Runtime artifacts
+logs/
+tmp/
+tgdl_*/
+
+# OS
+.DS_Store
+Thumbs.db

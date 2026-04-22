@@ -2,15 +2,23 @@
 Minimal Telegram handlers for a download-only bot.
 """
 
+import html
 import logging
+import time
 import uuid
-from datetime import datetime
-from typing import Any, Dict, Optional
+from collections import deque
+from typing import Any, Deque, Dict, Optional
 
-from aiogram import Dispatcher
+from aiogram import Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from config import (
+    MAX_PENDING_LINKS_PER_USER,
+    MAX_USER_TASKS,
+    USER_RATE_LIMIT_MESSAGES,
+    USER_RATE_LIMIT_WINDOW_SECONDS,
+)
 from managers import DownloadManager
 from models import Platform
 from utils import (
@@ -18,6 +26,7 @@ from utils import (
     find_first_url,
     is_supported_url,
     sanitize_user_input,
+    strip_tracking_params,
     validate_url_input,
 )
 
@@ -30,23 +39,32 @@ class BotHandlers:
     def __init__(self, dp: Dispatcher, download_manager: DownloadManager):
         self.dp = dp
         self.download_manager = download_manager
+
+        # token -> {user_id, url, created_at}
         self.pending_links: Dict[str, Dict[str, Any]] = {}
+        # user_id -> deque[token] (oldest first) for per-user LRU cap
+        self._user_tokens: Dict[int, Deque[str]] = {}
         self.pending_link_ttl_seconds = 3600
         self._last_pending_cleanup = 0.0
         self._pending_cleanup_interval_seconds = 60
+
+        # user_id -> deque[timestamp] of recent user interactions for rate limiting
+        self._user_events: Dict[int, Deque[float]] = {}
+
         self._register_handlers()
 
     def _register_handlers(self) -> None:
         self.dp.message.register(self.handle_start, Command(commands=["start"]))
         self.dp.message.register(self.handle_help, Command(commands=["help"]))
-        self.dp.message.register(self.handle_url_message)
+        self.dp.message.register(self.handle_url_message, F.text)
         self.dp.callback_query.register(
             self.handle_download_callback,
             lambda callback: (callback.data or "").startswith("download:"),
         )
 
     async def handle_start(self, message: Message) -> None:
-        username = message.from_user.username or "друг"
+        raw_username = message.from_user.username if message.from_user else None
+        username = html.escape(raw_username) if raw_username else "друг"
         text = (
             f"👋 Привет, {username}!\n\n"
             "Я скачиваю видео и аудио по ссылке.\n\n"
@@ -54,6 +72,7 @@ class BotHandlers:
             "• YouTube\n"
             "• TikTok\n"
             "• Instagram\n"
+            "• Facebook\n"
             "• X (Twitter)\n"
             "• VK\n"
             "• Reddit\n"
@@ -63,7 +82,7 @@ class BotHandlers:
             "• SoundCloud\n\n"
             "Просто отправь ссылку, затем выбери формат."
         )
-        await message.answer(text)
+        await message.answer(text, parse_mode="HTML")
 
     async def handle_help(self, message: Message) -> None:
         text = (
@@ -71,13 +90,23 @@ class BotHandlers:
             "1. Отправьте ссылку на пост или видео.\n"
             "2. Нажмите кнопку <b>Скачать видео</b> или <b>Скачать аудио</b>.\n"
             "3. Дождитесь загрузки файла.\n\n"
-            "Ограничение Telegram: до 2 ГБ на файл."
+            "Публичный Telegram Bot API позволяет отправлять файлы до 50 МБ. "
+            "Больший размер — только с self-hosted Bot API Server."
         )
         await message.answer(text, parse_mode="HTML")
 
     async def handle_url_message(self, message: Message) -> None:
+        if not message.from_user:
+            return
+
         text = sanitize_user_input(message.text or "")
         if not text or text.startswith("/"):
+            return
+
+        if self._is_rate_limited(message.from_user.id):
+            await message.answer(
+                "⏳ Слишком часто. Подождите немного и попробуйте снова."
+            )
             return
 
         url = find_first_url(text)
@@ -94,6 +123,8 @@ class BotHandlers:
             await message.answer("❌ Ссылка не поддерживается. Отправьте ссылку на поддерживаемый сервис.")
             return
 
+        url = strip_tracking_params(url)
+
         platform = detect_platform(url)
         token = self._create_pending_link(message.from_user.id, url)
         keyboard = InlineKeyboardMarkup(
@@ -106,7 +137,8 @@ class BotHandlers:
         )
 
         await message.answer(
-            f"{self._get_platform_emoji(platform)} <b>{platform.value}</b>\n\nВыберите формат загрузки:",
+            f"{self._get_platform_emoji(platform)} <b>{html.escape(platform.value)}</b>\n\n"
+            "Выберите формат загрузки:",
             parse_mode="HTML",
             reply_markup=keyboard,
         )
@@ -120,15 +152,21 @@ class BotHandlers:
 
         _, format_type, token = parts
         user_id = callback.from_user.id
+
+        if self._is_rate_limited(user_id):
+            await callback.answer("Слишком часто. Подождите немного.", show_alert=True)
+            return
+
         url = self._resolve_pending_link(token, user_id)
         if not url:
             await callback.answer("Ссылка устарела. Отправьте её заново.", show_alert=True)
             return
 
-        active_count = self.download_manager.get_user_active_downloads(user_id)
-        if active_count >= self.download_manager.max_concurrent:
+        active_for_user = self.download_manager.get_user_active_downloads(user_id)
+        if active_for_user >= MAX_USER_TASKS:
             await callback.answer(
-                f"У вас уже {active_count} активных задач. Подождите завершения.",
+                f"У вас уже {active_for_user} активных задач (лимит {MAX_USER_TASKS}). "
+                "Подождите завершения.",
                 show_alert=True,
             )
             return
@@ -148,14 +186,22 @@ class BotHandlers:
             except Exception:
                 logger.debug("Callback message edit failed", exc_info=True)
 
+    # ---------- pending-link bookkeeping ----------
+
     def _create_pending_link(self, user_id: int, url: str) -> str:
         self._cleanup_pending_links()
         token = uuid.uuid4().hex[:12]
         self.pending_links[token] = {
             "user_id": user_id,
             "url": url,
-            "created_at": datetime.now().timestamp(),
+            "created_at": time.time(),
         }
+
+        user_tokens = self._user_tokens.setdefault(user_id, deque())
+        user_tokens.append(token)
+        while len(user_tokens) > MAX_PENDING_LINKS_PER_USER:
+            old_token = user_tokens.popleft()
+            self.pending_links.pop(old_token, None)
         return token
 
     def _resolve_pending_link(self, token: str, user_id: int) -> Optional[str]:
@@ -168,7 +214,7 @@ class BotHandlers:
         return payload["url"]
 
     def _cleanup_pending_links(self) -> None:
-        now = datetime.now().timestamp()
+        now = time.time()
         if now - self._last_pending_cleanup < self._pending_cleanup_interval_seconds:
             return
         self._last_pending_cleanup = now
@@ -180,6 +226,27 @@ class BotHandlers:
         ]
         for token in expired_tokens:
             self.pending_links.pop(token, None)
+
+        # Also compact per-user token queues.
+        for user_id, tokens in list(self._user_tokens.items()):
+            live = deque(t for t in tokens if t in self.pending_links)
+            if live:
+                self._user_tokens[user_id] = live
+            else:
+                self._user_tokens.pop(user_id, None)
+
+    # ---------- rate limiting ----------
+
+    def _is_rate_limited(self, user_id: int) -> bool:
+        now = time.time()
+        window_start = now - USER_RATE_LIMIT_WINDOW_SECONDS
+        events = self._user_events.setdefault(user_id, deque())
+        while events and events[0] < window_start:
+            events.popleft()
+        if len(events) >= USER_RATE_LIMIT_MESSAGES:
+            return True
+        events.append(now)
+        return False
 
     @staticmethod
     def _get_platform_emoji(platform: Platform) -> str:

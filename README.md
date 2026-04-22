@@ -6,6 +6,7 @@
 - YouTube
 - TikTok
 - Instagram
+- Facebook
 - X (Twitter)
 - VK
 - Reddit
@@ -46,5 +47,32 @@
 3. Задача ставится в очередь.
 4. `yt-dlp` скачивает файл, бот отправляет его в Telegram.
 
-## Примечание
-Ограничение Telegram: до 2 ГБ на файл.
+## Переменные окружения
+
+| Переменная | По умолчанию | Назначение |
+|------------|--------------|-----------|
+| `BOT_TOKEN` | — | Токен Telegram-бота (обязателен). |
+| `LOG_LEVEL` | `INFO` | Уровень логирования. |
+| `MAX_CONCURRENT_DOWNLOADS` | `3` | Сколько воркеров тянут файлы параллельно. |
+| `MAX_USER_TASKS` | `2` | Лимит активных задач на пользователя. |
+| `MAX_FILE_SIZE_MB` | `50` | Предельный размер файла для отправки. |
+| `DOWNLOAD_TIMEOUT_SECONDS` | `600` | Таймаут одной загрузки. |
+| `TELEGRAM_API_BASE` | — | URL self-hosted Bot API Server (включает лимит 2000 МБ). |
+| `MAX_PENDING_LINKS_PER_USER` | `20` | Сколько ссылок одного юзера хранить в ожидании выбора формата. |
+| `USER_RATE_LIMIT_MESSAGES` / `USER_RATE_LIMIT_WINDOW_SECONDS` | `20` / `60` | Антиспам: максимум событий в окне. |
+| `YTDLP_COOKIES_FILE` | — | Путь к cookies.txt для yt-dlp. |
+| `YTDLP_COOKIES_FROM_BROWSER` | — | Источник cookies из браузера, например `chrome` или `firefox:default-release`. |
+
+## Ограничения по размеру файла
+
+Публичный Telegram Bot API (`api.telegram.org`) пропускает через `sendVideo`/`sendAudio`/`sendDocument`
+**не более 50 МБ**. Если нужно больше (до 2000 МБ), поднимите
+[self-hosted Bot API Server](https://core.telegram.org/bots/api#using-a-local-bot-api-server)
+и задайте `TELEGRAM_API_BASE=http://<host>:<port>` плюс соответствующий `MAX_FILE_SIZE_MB`.
+
+## Деплой
+
+В репо есть пример `render.yaml` для Render (Web Service). Для Free tier сервис должен
+отвечать по HTTP, поэтому бот запускает мини health-endpoint (`/health`). На других
+платформах (Railway, fly.io, собственный сервер) достаточно запускать `python main.py` как
+worker — в этом случае health-сервер можно не держать (Render-specific).
