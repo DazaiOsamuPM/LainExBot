@@ -39,8 +39,7 @@ class ErrorManager:
 
         if "unsupported" in msg:
             return (
-                "❌ <b>Ссылка не поддерживается.</b>\n"
-                "Отправьте прямую ссылку на пост или видео."
+                "❌ <b>Ссылка не поддерживается.</b>\n" "Отправьте прямую ссылку на пост или видео."
             )
 
         if (
@@ -57,22 +56,13 @@ class ErrorManager:
             )
 
         if "too many requests" in msg or "rate limit" in msg or "flood" in msg:
-            return (
-                "⏳ <b>Слишком много запросов.</b>\n"
-                "Подождите минуту и попробуйте снова."
-            )
+            return "⏳ <b>Слишком много запросов.</b>\n" "Подождите минуту и попробуйте снова."
 
         if "timeout" in msg or "timed out" in msg:
-            return (
-                "⏱️ <b>Превышено время ожидания.</b>\n"
-                "Попробуйте снова чуть позже."
-            )
+            return "⏱️ <b>Превышено время ожидания.</b>\n" "Попробуйте снова чуть позже."
 
         if "disk" in msg or "space" in msg:
-            return (
-                "💾 <b>Недостаточно места на диске.</b>\n"
-                "Повторите попытку позже."
-            )
+            return "💾 <b>Недостаточно места на диске.</b>\n" "Повторите попытку позже."
 
         if "unable to extract webpage video data" in msg:
             return (
@@ -87,10 +77,7 @@ class ErrorManager:
             )
 
         safe_details = html.escape(str(error))[:350]
-        return (
-            "⚠️ <b>Не удалось скачать медиа.</b>\n"
-            f"<code>{safe_details}</code>"
-        )
+        return "⚠️ <b>Не удалось скачать медиа.</b>\n" f"<code>{safe_details}</code>"
 
 
 error_manager = ErrorManager()

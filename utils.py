@@ -2,23 +2,26 @@
 Utilities for URL parsing, validation and file operations.
 """
 
+import html
+import ipaddress
 import os
 import re
 import shutil
 import tempfile
-import html
+from typing import Mapping, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
-from typing import Optional, Tuple
 
 import aiofiles
 import aiohttp
 
 from config import (
-    URL_RE,
+    ALLOW_PRIVATE_URLS,
     DIRECT_FILE_RE,
-    SUPPORTED_DOMAINS,
+    MAX_FILE_SIZE_MB,
     SHORTENER_DOMAINS,
+    SUPPORTED_DOMAINS,
     TEMP_DIR_PREFIX,
+    URL_RE,
 )
 from models import Platform
 
@@ -28,7 +31,9 @@ def find_first_url(text: str) -> Optional[str]:
     if not text:
         return None
     match = URL_RE.search(text)
-    return match.group(0) if match else None
+    if not match:
+        return None
+    return match.group(0).rstrip(".,;:!?")
 
 
 def strip_tracking_params(url: str) -> str:
@@ -40,7 +45,15 @@ def strip_tracking_params(url: str) -> str:
             key: value
             for key, value in query_params.items()
             if key.lower()
-            not in {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid"}
+            not in {
+                "utm_source",
+                "utm_medium",
+                "utm_campaign",
+                "utm_term",
+                "utm_content",
+                "fbclid",
+                "gclid",
+            }
         }
         clean_query = urlencode(clean_params, doseq=True)
         return urlunparse(
@@ -65,6 +78,32 @@ def _host_matches(host: Optional[str], domain: str) -> bool:
         return False
     domain = domain.lower()
     return host == domain or host.endswith("." + domain)
+
+
+def _is_private_or_local_host(host: Optional[str]) -> bool:
+    """Detect hosts that should not be fetched by a public bot."""
+    if not host:
+        return True
+
+    normalized = host.strip("[]").lower().rstrip(".")
+    if normalized in {"localhost", "0.0.0.0"} or normalized.endswith(".localhost"):
+        return True
+
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+
+    return any(
+        (
+            address.is_loopback,
+            address.is_private,
+            address.is_link_local,
+            address.is_multicast,
+            address.is_reserved,
+            address.is_unspecified,
+        )
+    )
 
 
 def host_matches_any(url: str, domains) -> bool:
@@ -226,16 +265,19 @@ async def normalize_tiktok_url_async(url: str, session: aiohttp.ClientSession) -
     - resolve short links
     - extract direct /video/ URL from destination page when needed
     """
-    host = (_url_hostname(url) or "")
+    host = _url_hostname(url) or ""
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) " "AppleWebKit/605.1.15"
         )
     }
 
     try:
         final_url = url
+        final_clean = strip_tracking_params(final_url)
+        if "/video/" in final_clean:
+            return final_clean
+
         if any(_host_matches(host, domain) for domain in SHORTENER_DOMAINS):
             try:
                 async with session.head(
@@ -276,12 +318,27 @@ async def download_file_async(
     filepath: str,
     session: aiohttp.ClientSession,
     timeout: int = 300,
+    max_size_mb: int = MAX_FILE_SIZE_MB,
+    headers: Optional[Mapping[str, str]] = None,
 ) -> None:
     """Download direct file URL to local path."""
-    async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+    max_bytes = max_size_mb * 1024 * 1024 if max_size_mb and max_size_mb > 0 else None
+    downloaded = 0
+
+    async with session.get(
+        url,
+        timeout=aiohttp.ClientTimeout(total=timeout),
+        headers=headers,
+    ) as response:
         response.raise_for_status()
+        if max_bytes and response.content_length and response.content_length > max_bytes:
+            raise ValueError(f"Файл больше лимита Telegram ({max_size_mb} МБ).")
+
         async with aiofiles.open(filepath, "wb") as file:
             async for chunk in response.content.iter_chunked(8192):
+                downloaded += len(chunk)
+                if max_bytes and downloaded > max_bytes:
+                    raise ValueError(f"Файл больше лимита Telegram ({max_size_mb} МБ).")
                 await file.write(chunk)
 
 
@@ -298,6 +355,8 @@ def validate_url_input(url: str) -> Tuple[bool, str]:
             return False, "Поддерживаются только HTTP/HTTPS URL"
         if not parsed.netloc:
             return False, "Некорректный URL"
+        if not ALLOW_PRIVATE_URLS and _is_private_or_local_host(parsed.hostname):
+            return False, "URL с локальным или приватным адресом не поддерживается"
     except Exception:
         return False, "Некорректный URL"
 

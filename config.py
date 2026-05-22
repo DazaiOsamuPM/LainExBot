@@ -7,6 +7,14 @@ import re
 from typing import Any, Dict, List, Tuple
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment flag."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def require_bot_token() -> str:
     """Return bot token or raise if it is not configured."""
     token = os.getenv("BOT_TOKEN", "").strip()
@@ -28,11 +36,13 @@ DOWNLOAD_TIMEOUT_SECONDS: int = int(os.getenv("DOWNLOAD_TIMEOUT_SECONDS", "600")
 
 # Optional custom Bot API endpoint (e.g. self-hosted server). Leave empty for the default.
 TELEGRAM_API_BASE: str = os.getenv("TELEGRAM_API_BASE", "").strip()
+ENABLE_HEALTH_SERVER: bool = _env_flag("ENABLE_HEALTH_SERVER", default=False)
 
 # Per-user anti-spam limits (in-memory, best effort).
 MAX_PENDING_LINKS_PER_USER: int = int(os.getenv("MAX_PENDING_LINKS_PER_USER", "20"))
 USER_RATE_LIMIT_MESSAGES: int = int(os.getenv("USER_RATE_LIMIT_MESSAGES", "20"))
 USER_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("USER_RATE_LIMIT_WINDOW_SECONDS", "60"))
+ALLOW_PRIVATE_URLS: bool = _env_flag("ALLOW_PRIVATE_URLS", default=False)
 
 TEMP_DIR_PREFIX: str = "tgdl_"
 YTDLP_COOKIES_FILE: str = os.getenv("YTDLP_COOKIES_FILE", "").strip()

@@ -59,8 +59,7 @@ class DownloadManager:
         self._http_session: Optional[aiohttp.ClientSession] = None
 
         self._workers: List[asyncio.Task] = [
-            asyncio.create_task(self._worker_loop(idx))
-            for idx in range(self.max_concurrent)
+            asyncio.create_task(self._worker_loop(idx)) for idx in range(self.max_concurrent)
         ]
 
     def _get_http_session(self) -> aiohttp.ClientSession:
@@ -147,8 +146,11 @@ class DownloadManager:
 
         try:
             temp_dir = create_temp_dir()
-            if not has_enough_disk_space(temp_dir, required_mb=500):
-                raise RuntimeError("Недостаточно места на диске.")
+            required_space_mb = max(100, MAX_FILE_SIZE_MB + 50)
+            if not has_enough_disk_space(temp_dir, required_mb=required_space_mb):
+                raise RuntimeError(
+                    f"Недостаточно места на диске. Нужно минимум {required_space_mb} МБ."
+                )
 
             status_msg = await callback_query.message.answer(f"Загрузка #{task_id} запущена...")
             task.status = DownloadStatus.DOWNLOADING
@@ -194,7 +196,9 @@ class DownloadManager:
 
         if platform == Platform.DIRECT:
             parsed = urlparse(url)
-            filename = sanitize_filename(os.path.basename(parsed.path) or f"download_{int(time.time())}")
+            filename = sanitize_filename(
+                os.path.basename(parsed.path) or f"download_{int(time.time())}"
+            )
             if "." not in filename:
                 filename += ".mp3" if is_audio else ".mp4"
 
@@ -204,6 +208,8 @@ class DownloadManager:
                 filepath=filepath,
                 session=self._get_http_session(),
                 timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                max_size_mb=MAX_FILE_SIZE_MB,
+                headers=YTDL_BASE_OPTS.get("http_headers"),
             )
             return filepath
 
@@ -267,8 +273,7 @@ class DownloadManager:
         """Best-effort fallback download for TikTok when yt-dlp extractor fails."""
         headers = {
             "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15"
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) " "AppleWebKit/605.1.15"
             ),
             "Referer": "https://www.tiktok.com/",
         }
@@ -294,6 +299,8 @@ class DownloadManager:
                 filepath=filepath,
                 session=session,
                 timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                max_size_mb=MAX_FILE_SIZE_MB,
+                headers=headers,
             )
             if os.path.exists(filepath):
                 logger.info("TikTok direct HTML fallback succeeded")
@@ -331,7 +338,12 @@ class DownloadManager:
         attempts: List[Tuple[str, bool]] = []
         canonical = self._canonicalize_tiktok_video_url(url)
 
-        for attempt_url, app_api in ((url, False), (canonical, False), (url, True), (canonical, True)):
+        for attempt_url, app_api in (
+            (url, False),
+            (canonical, False),
+            (url, True),
+            (canonical, True),
+        ):
             if not attempt_url:
                 continue
             key = (attempt_url, app_api)
@@ -378,13 +390,18 @@ class DownloadManager:
             ydl_opts.update(
                 {
                     # Keep original best audio to avoid mandatory ffmpeg dependency on free hosts.
-                    "format": "bestaudio[ext=m4a]/bestaudio/best",
+                    "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
                 }
             )
         else:
             ydl_opts.update(
                 {
-                    "format": "bestvideo+bestaudio/best",
+                    # Prefer a single pre-merged file; fall back to merged streams when needed.
+                    "format": (
+                        "best[ext=mp4]/best/"
+                        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+                        "bestvideo+bestaudio"
+                    ),
                     "merge_output_format": "mp4",
                 }
             )
@@ -508,7 +525,9 @@ class DownloadManager:
             return None
         return str(max(files, key=lambda item: item.stat().st_mtime))
 
-    async def _send_file(self, callback_query: Any, filepath: str, mode: str, status_msg: Any) -> None:
+    async def _send_file(
+        self, callback_query: Any, filepath: str, mode: str, status_msg: Any
+    ) -> None:
         from aiogram.types import FSInputFile
 
         if status_msg:
@@ -561,9 +580,16 @@ class DownloadManager:
             or "video not available" in msg
         )
         if is_expected:
-            logger.warning("Download failed for user=%s url=%s: %s", callback_query.from_user.id, url, error)
+            logger.warning(
+                "Download failed for user=%s url=%s: %s", callback_query.from_user.id, url, error
+            )
         else:
-            logger.error("Download failed for user=%s url=%s", callback_query.from_user.id, url, exc_info=True)
+            logger.error(
+                "Download failed for user=%s url=%s",
+                callback_query.from_user.id,
+                url,
+                exc_info=True,
+            )
 
         user_message = error_manager.to_user_message(error, url=url)
 
@@ -642,7 +668,10 @@ class _YtdlpProgressReporter:
             return
 
         now = time.monotonic()
-        if now - self._last_edit < _PROGRESS_EDIT_INTERVAL_SECONDS and info.get("status") != "finished":
+        if (
+            now - self._last_edit < _PROGRESS_EDIT_INTERVAL_SECONDS
+            and info.get("status") != "finished"
+        ):
             return
         self._last_edit = now
         self._last_text = text

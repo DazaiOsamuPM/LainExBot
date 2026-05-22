@@ -29,3 +29,7 @@ services:
         value: "50"
       - key: DOWNLOAD_TIMEOUT_SECONDS
         value: "600"
+      - key: ALLOW_PRIVATE_URLS
+        value: "false"
+      - key: ENABLE_HEALTH_SERVER
+        value: "true"

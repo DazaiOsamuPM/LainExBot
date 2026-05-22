@@ -20,7 +20,7 @@ from config import (
     USER_RATE_LIMIT_WINDOW_SECONDS,
 )
 from managers import DownloadManager
-from models import Platform
+from models import FileFormat, Platform
 from utils import (
     detect_platform,
     find_first_url,
@@ -103,24 +103,29 @@ class BotHandlers:
         if not text or text.startswith("/"):
             return
 
-        if self._is_rate_limited(message.from_user.id):
-            await message.answer(
-                "⏳ Слишком часто. Подождите немного и попробуйте снова."
-            )
-            return
-
+        is_private_chat = self._is_private_chat(message)
         url = find_first_url(text)
         if not url:
-            await message.answer("❌ Не нашёл ссылку в сообщении. Отправьте URL напрямую.")
+            if is_private_chat:
+                await message.answer("❌ Не нашёл ссылку в сообщении. Отправьте URL напрямую.")
             return
 
         valid, error = validate_url_input(url)
         if not valid:
-            await message.answer(f"❌ {error}")
+            if is_private_chat:
+                await message.answer(f"❌ {error}")
             return
 
         if not is_supported_url(url):
-            await message.answer("❌ Ссылка не поддерживается. Отправьте ссылку на поддерживаемый сервис.")
+            if is_private_chat:
+                await message.answer(
+                    "❌ Ссылка не поддерживается. Отправьте ссылку на поддерживаемый сервис."
+                )
+            return
+
+        if self._is_rate_limited(message.from_user.id):
+            if is_private_chat:
+                await message.answer("⏳ Слишком часто. Подождите немного и попробуйте снова.")
             return
 
         url = strip_tracking_params(url)
@@ -130,8 +135,12 @@ class BotHandlers:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="🎬 Скачать видео", callback_data=f"download:video:{token}"),
-                    InlineKeyboardButton(text="🎵 Скачать аудио", callback_data=f"download:audio:{token}"),
+                    InlineKeyboardButton(
+                        text="🎬 Скачать видео", callback_data=f"download:video:{token}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🎵 Скачать аудио", callback_data=f"download:audio:{token}"
+                    ),
                 ]
             ]
         )
@@ -153,6 +162,10 @@ class BotHandlers:
         _, format_type, token = parts
         user_id = callback.from_user.id
 
+        if format_type not in {FileFormat.VIDEO.value, FileFormat.AUDIO.value}:
+            await callback.answer("Некорректный формат загрузки.", show_alert=True)
+            return
+
         if self._is_rate_limited(user_id):
             await callback.answer("Слишком часто. Подождите немного.", show_alert=True)
             return
@@ -171,6 +184,13 @@ class BotHandlers:
             )
             return
 
+        url = self._resolve_pending_link(token, user_id, consume=True)
+        if not url:
+            await callback.answer(
+                "Ссылка уже обрабатывается. Отправьте её заново.", show_alert=True
+            )
+            return
+
         queued = await self.download_manager.add_download(callback, url, format_type)
         if not queued:
             await callback.answer("Не удалось поставить задачу в очередь.", show_alert=True)
@@ -181,7 +201,9 @@ class BotHandlers:
         if callback.message:
             try:
                 await callback.message.edit_text(
-                    f"⏳ Задача добавлена в очередь\nФормат: {format_type}\nПозиция: #{queue_position}"
+                    "⏳ Задача добавлена в очередь\n"
+                    f"Формат: {format_type}\n"
+                    f"Позиция: #{queue_position}"
                 )
             except Exception:
                 logger.debug("Callback message edit failed", exc_info=True)
@@ -204,14 +226,31 @@ class BotHandlers:
             self.pending_links.pop(old_token, None)
         return token
 
-    def _resolve_pending_link(self, token: str, user_id: int) -> Optional[str]:
+    def _resolve_pending_link(
+        self, token: str, user_id: int, consume: bool = False
+    ) -> Optional[str]:
         self._cleanup_pending_links()
         payload = self.pending_links.get(token)
         if not payload:
             return None
         if payload["user_id"] != user_id:
             return None
-        return payload["url"]
+        url = payload["url"]
+        if consume:
+            self._remove_pending_link(token, user_id)
+        return url
+
+    def _remove_pending_link(self, token: str, user_id: int) -> None:
+        self.pending_links.pop(token, None)
+        user_tokens = self._user_tokens.get(user_id)
+        if not user_tokens:
+            return
+        try:
+            user_tokens.remove(token)
+        except ValueError:
+            pass
+        if not user_tokens:
+            self._user_tokens.pop(user_id, None)
 
     def _cleanup_pending_links(self) -> None:
         now = time.time()
@@ -247,6 +286,12 @@ class BotHandlers:
             return True
         events.append(now)
         return False
+
+    @staticmethod
+    def _is_private_chat(message: Message) -> bool:
+        chat = getattr(message, "chat", None)
+        chat_type = getattr(chat, "type", None)
+        return chat_type == "private" or chat_type is None
 
     @staticmethod
     def _get_platform_emoji(platform: Platform) -> str:

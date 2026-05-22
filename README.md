@@ -20,7 +20,7 @@
 - История загрузок
 - Персональные настройки
 - Админ-статистика
-- Веб-сервер health/stats
+- Админская веб-статистика
 - Лишние команды и callback-ветки
 
 ## Быстрый запуск
@@ -58,8 +58,10 @@
 | `MAX_FILE_SIZE_MB` | `50` | Предельный размер файла для отправки. |
 | `DOWNLOAD_TIMEOUT_SECONDS` | `600` | Таймаут одной загрузки. |
 | `TELEGRAM_API_BASE` | — | URL self-hosted Bot API Server (включает лимит 2000 МБ). |
+| `ENABLE_HEALTH_SERVER` | `false` | Включить HTTP `/health`, если хостинг требует открытый порт. |
 | `MAX_PENDING_LINKS_PER_USER` | `20` | Сколько ссылок одного юзера хранить в ожидании выбора формата. |
 | `USER_RATE_LIMIT_MESSAGES` / `USER_RATE_LIMIT_WINDOW_SECONDS` | `20` / `60` | Антиспам: максимум событий в окне. |
+| `ALLOW_PRIVATE_URLS` | `false` | Разрешать локальные и приватные адреса (`127.0.0.1`, `10.0.0.0/8` и т.п.) для прямых ссылок. По умолчанию запрещено. |
 | `YTDLP_COOKIES_FILE` | — | Путь к cookies.txt для yt-dlp. |
 | `YTDLP_COOKIES_FROM_BROWSER` | — | Источник cookies из браузера, например `chrome` или `firefox:default-release`. |
 
@@ -72,7 +74,11 @@
 
 ## Деплой
 
-В репо есть пример `render.yaml` для Render (Web Service). Для Free tier сервис должен
-отвечать по HTTP, поэтому бот запускает мини health-endpoint (`/health`). На других
-платформах (Railway, fly.io, собственный сервер) достаточно запускать `python main.py` как
-worker — в этом случае health-сервер можно не держать (Render-specific).
+Для VPS, systemd, Docker worker, Railway worker и похожих окружений достаточно запускать:
+
+```bash
+python main.py
+```
+
+HTTP health-endpoint по умолчанию выключен. Если хостинг требует открытый порт,
+задайте `ENABLE_HEALTH_SERVER=true`; бот поднимет `/health` на `PORT` или `10000`.

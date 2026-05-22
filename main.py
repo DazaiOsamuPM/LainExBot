@@ -15,7 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 from dotenv import load_dotenv
 
-from config import LOG_LEVEL, TELEGRAM_API_BASE, require_bot_token
+from config import ENABLE_HEALTH_SERVER, LOG_LEVEL, TELEGRAM_API_BASE, require_bot_token
 from errors import setup_logging
 from handlers import BotHandlers
 from managers import DownloadManager
@@ -25,7 +25,8 @@ shutdown_event = asyncio.Event()
 
 
 async def start_health_server() -> None:
-    """Run a tiny HTTP server so Render Web Service can keep this app healthy."""
+    """Run a tiny optional HTTP server for hosts that require health checks."""
+    logger = logging.getLogger(__name__)
     app = web.Application()
 
     async def health(request: web.Request) -> web.Response:
@@ -40,8 +41,14 @@ async def start_health_server() -> None:
     host = "0.0.0.0"
     port = int(os.getenv("PORT", "10000"))
     site = web.TCPSite(runner, host=host, port=port)
-    await site.start()
-    logging.getLogger(__name__).info("Health server started on %s:%s", host, port)
+    try:
+        await site.start()
+    except OSError as error:
+        logger.warning("Health server could not start on %s:%s: %s", host, port, error)
+        await runner.cleanup()
+        return
+
+    logger.info("Health server started on %s:%s", host, port)
 
     try:
         await shutdown_event.wait()
@@ -71,7 +78,8 @@ async def main() -> None:
         download_manager = DownloadManager()
         BotHandlers(dp=dispatcher, download_manager=download_manager)
 
-        health_server_task = asyncio.create_task(start_health_server())
+        if ENABLE_HEALTH_SERVER:
+            health_server_task = asyncio.create_task(start_health_server())
         await dispatcher.start_polling(bot)
     except Exception:
         logging.getLogger(__name__).exception("Fatal startup/runtime error")
